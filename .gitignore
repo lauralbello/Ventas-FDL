@@ -1,0 +1,12 @@
+# Solo se versiona el dashboard en sí — el resto de la carpeta (backups,
+# pruebas, exports viejos, scripts de una sola vez) se queda fuera.
+*
+
+!.gitignore
+!index.html
+!data.js
+!app.js
+!app-ui.js
+!brand-mapping.js
+!brand-categories.js
+!insights-engine.js
