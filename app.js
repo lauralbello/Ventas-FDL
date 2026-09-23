@@ -148,6 +148,19 @@ function dedupeIdenticalLevers() {
     const saved = JSON.parse(localStorage.getItem('metaProjection') || 'null');
     if (saved && typeof saved === 'object') Object.assign(state.metaProjection, saved);
   } catch (e) { /* ignore corrupt storage */ }
+  // Publicación compartida de solo-lectura: `published-projections.js` (un
+  // archivo estático más, publicado junto a data.js) contiene la última
+  // instantánea de savedList/assignments que Laura decidió compartir. Se
+  // sobreescribe SIEMPRE aquí (después de leer localStorage) para que
+  // cualquier persona que entre al link vea las mismas proyecciones/palancas
+  // más recientes, sin necesidad de exportar/importar — la edición real sigue
+  // pasando solo en la copia de trabajo de Laura (localhost:8000); este link
+  // público nunca es la fuente de la verdad para savedList/assignments, así
+  // que sobreescribirlos en cada carga no le hace perder nada a nadie.
+  if (typeof PUBLISHED_PROJECTIONS === 'object' && PUBLISHED_PROJECTIONS) {
+    state.metaProjection.savedList = JSON.parse(JSON.stringify(PUBLISHED_PROJECTIONS.savedList || []));
+    state.metaProjection.assignments = JSON.parse(JSON.stringify(PUBLISHED_PROJECTIONS.assignments || []));
+  }
   // El "pin" de edición explícita (resolveMetaProjectionForFilter) solo debía
   // durar mientras el Editor estuviera abierto en esa sesión — pero al
   // persistirse dentro de todo el objeto metaProjection, sobrevivía a cerrar

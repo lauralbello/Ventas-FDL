@@ -5,6 +5,7 @@
 !.gitignore
 !index.html
 !data.js
+!published-projections.js
 !app.js
 !app-ui.js
 !brand-mapping.js
