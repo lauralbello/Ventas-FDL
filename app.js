@@ -907,26 +907,49 @@ function renderAll() {
   // sincronizada con el resto del dashboard — sin esto, cambiar el filtro de País
   // (u otro estado global) no refrescaba estas tablas hasta tocar un input propio
   // del formulario de proyección, dejando ver valores del país filtrado anterior.
+  // Las pestañas pesadas (Proyección de Metas, Insights, Año vs Año) solo se
+  // recalculan si están a la vista. Con ~1.5M de filas (incluye todo 2025),
+  // generateInsights (~7 s) y renderProjResultTables (~5 s) corrían en CADA clic
+  // de filtro aunque estuvieras en Visual General, congelando la página ~20 s y
+  // pareciendo que el filtro "no deja seleccionar". Si estaban ocultas, se
+  // marcan como pendientes y switchMainTab() las calcula al abrirlas.
+  const activeTab = getActiveMainTab();
+  if (activeTab === 'proyeccion') {
+    renderProjectionTabContent();
+  } else {
+    deferredTabDirty.proyeccion = true;
+  }
+  if (activeTab === 'insights' || activeTab === 'yoy') {
+    renderInsightsTabContent();
+  } else {
+    deferredTabDirty.insights = true;
+  }
+}
+
+const deferredTabDirty = { proyeccion: true, insights: true };
+
+function getActiveMainTab() {
+  const el = document.querySelector('.main-tab-content.active');
+  return el ? el.id.replace(/-content$/, '') : null;
+}
+
+function renderProjectionTabContent() {
+  deferredTabDirty.proyeccion = false;
   if (typeof renderProjBaselineTable === 'function') renderProjBaselineTable();
   if (typeof renderProjResultTables === 'function') renderProjResultTables();
-  // Mismo motivo que las dos anteriores: la lista de "Palancas de Proyección" filtra
-  // qué palancas mostrar según el país activo (leverAppliesToActiveCountryFilter), pero
-  // sin esta llamada esa lista solo se refrescaba al agregar/editar/eliminar una palanca
-  // directamente — cambiar el filtro de País en cualquier otra pestaña la dejaba mostrando
-  // palancas de un país que ya no coincidía con el filtro.
   if (typeof renderProjectionLevers === 'function') renderProjectionLevers();
-  // Igual que las dos anteriores: sin esto, la lista de "Proyecciones Guardadas"
-  // (incluido el total de la proyección "aplicada") solo se recalculaba al entrar
-  // a esa pestaña o guardar/aplicar/eliminar una proyección — quedando desfasada
-  // del total ya recalculado en "Resumen General" en cuanto cambiabas el filtro de
-  // fecha/país en cualquier otra pestaña (más notorio con proyecciones a "mes actual").
   if (typeof renderProjSavedList === 'function') renderProjSavedList();
-  // Igual patrón: la etiqueta "COP/PEN/MXN (moneda local)" del selector de palancas
-  // quedaba fija en "COP" aunque filtraras otro país, hasta reabrir la pestaña.
   if (typeof updateProjLeverCurrencyLabel === 'function') updateProjLeverCurrencyLabel();
-  if (typeof generateInsights === 'function') {
-    generateInsights(FACTS);
-  }
+}
+
+function renderInsightsTabContent() {
+  deferredTabDirty.insights = false;
+  if (typeof generateInsights === 'function') generateInsights(FACTS);
+}
+
+function renderDeferredForTab(tabId) {
+  if (tabId === 'proyeccion' && deferredTabDirty.proyeccion) renderProjectionTabContent();
+  if ((tabId === 'insights' || tabId === 'yoy') && deferredTabDirty.insights) renderInsightsTabContent();
 }
 
 function initApp() {
