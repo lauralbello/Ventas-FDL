@@ -648,8 +648,19 @@ function computeLeverImpact(facts, countryCode) {
 function getLeverImpactsForScope(countries) {
   const proj = state.metaProjection;
   if (proj && proj.active) {
+    // El borrador compartido (proj.levers) puede traer palancas de OTRO país (p.ej.
+    // las de Colombia ya cargadas) mientras se filtra Perú/México. Antes se sumaban
+    // todas sin mirar el país: al no tener ventas allí caían en la fila "Palancas
+    // sin ventas aún" e inflaban la meta de ese país con montos que no son suyos.
+    // Una palanca que declara scope.countries solo aplica si coincide con el filtro.
+    const filtering = countries && countries.length && countries.length < DIM_COUNTRIES.length;
     return (proj.levers || [])
       .filter(l => l.amountUSD && l.active !== false)
+      .filter(l => {
+        if (!filtering) return true;
+        const lc = l.scope && l.scope.countries;
+        return !lc || !lc.length || lc.some(c => countries.includes(c));
+      })
       .map(l => ({ name: l.name, amountUSD: l.amountUSD, scope: l.scope || {} }));
   }
   // Las 5 palancas "legacy" nacieron cuando Foodology solo operaba en Colombia
