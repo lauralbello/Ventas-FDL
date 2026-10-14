@@ -190,10 +190,14 @@ function renderFilterOptions() {
 
   // Filtrar opciones por país seleccionado (si hay país seleccionado, SOLO mostrar ese país)
   const selectedCountries = state.filters.country.length > 0 ? state.filters.country : opts.countryOpts;
-  const filteredCities = opts.cityOpts.filter(c => FACTS.some(f => f.city === c && selectedCountries.includes(f.country)));
-  const filteredKitchens = opts.kitchenOpts.filter(k => FACTS.some(f => f.kitchenId === k.id && selectedCountries.includes(f.country)));
-  const filteredProviders = opts.providerOpts.filter(p => FACTS.some(f => f.provider === p && selectedCountries.includes(f.country)));
-  const filteredBrands = opts.brandOpts.filter(b => FACTS.some(f => f.brandId === b.id && selectedCountries.includes(f.country)));
+  // Cada opción de computeCascadeOptions() ya sale de filas de los países
+  // seleccionados (o de todos si no hay ninguno), así que la comprobación que había
+  // aquí —un FACTS.some(...) por opción, hasta recorrer 1.5M de filas cada vez— era
+  // siempre verdadera. Se conservan las listas tal cual.
+  const filteredCities = opts.cityOpts;
+  const filteredKitchens = opts.kitchenOpts;
+  const filteredProviders = opts.providerOpts;
+  const filteredBrands = opts.brandOpts;
 
   renderMultiSelectPanel('city', 'panel-filter-city', filteredCities, v => v, v => v, ['kitchen', 'provider', 'brand']);
   renderMultiSelectPanel('kitchen', 'panel-filter-kitchen', filteredKitchens, o => o.id, o => o.name, ['provider', 'brand']);
@@ -216,7 +220,8 @@ function renderChips() {
     brand: v => (window.__brandNameById && window.__brandNameById[v]) || v
   };
   const kitchenById = {}; const brandById = {};
-  for (const f of FACTS) { kitchenById[f.kitchenId] = f.kitchenName; brandById[f.brandId] = f.brandName; }
+  const tup = window.__DIM_TUPLES;
+  for (const f of ((tup && tup.n === FACTS.length) ? tup.list : FACTS)) { kitchenById[f.kitchenId] = f.kitchenName; brandById[f.brandId] = f.brandName; }
   window.__kitchenNameById = kitchenById; window.__brandNameById = brandById;
 
   Object.entries(state.filters).forEach(([key, arr]) => {
@@ -688,6 +693,23 @@ function calculateTotalMetaWithLevers(facts, countries) {
   return fxValue(baseMetaCOP + leverImpactCOP, fxCountry);
 }
 
+// Las filas de la ventana de baseline para un país/rango se piden desde cada
+// tabla (por marca, ciudad, cocina, categoría...) con los mismos parámetros;
+// se filtran una sola vez y se reutilizan. Solo se leen, nunca se modifican.
+const __baselineFactsCache = new Map();
+function getBaselineFactsCached(from, to, countries) {
+  const key = from + '|' + to + '|' + countries.join(',') + '#' + FACTS.length;
+  let hit = __baselineFactsCache.get(key);
+  if (!hit) {
+    const part = window.__FACTS_BY_COUNTRY;
+    const src = (countries.length === 1 && part && part.n === FACTS.length && part.map.get(countries[0])) || FACTS;
+    hit = src.filter(f => f.gran === 'day' && f.dateISO >= from && f.dateISO <= to && countries.includes(f.country));
+    if (__baselineFactsCache.size > 12) __baselineFactsCache.clear();
+    __baselineFactsCache.set(key, hit);
+  }
+  return hit;
+}
+
 function breakdownBy(facts, keyFn, labelFn, countries, baseMetaCOP, leverImpacts, dateFacts) {
   const groups = new Map();
   for (const f of facts) {
@@ -712,11 +734,7 @@ function breakdownBy(facts, keyFn, labelFn, countries, baseMetaCOP, leverImpacts
   // Baseline (por defecto mes anterior al mes proyectado, o el rango personalizado
   // de la Proyección de Metas si está activa) para distribución proporcional de la meta base
   const { from: baselineFrom, to: baselineTo } = getMetaBaselineRange(year, month);
-  const baselineFactsAll = FACTS.filter(f =>
-    f.gran === 'day' &&
-    f.dateISO >= baselineFrom && f.dateISO <= baselineTo &&
-    countries.includes(f.country)
-  );
+  const baselineFactsAll = getBaselineFactsCached(baselineFrom, baselineTo, countries);
   // Las cocinas cerradas/excluidas (total o parcialmente, ver kitchenOpenFraction)
   // aportan al baseline solo la fracción del mes proyectado que seguirán abiertas
   // — así ninguna palanca, ni siquiera una de alcance amplio, puede volver a

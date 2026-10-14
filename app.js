@@ -247,17 +247,41 @@ function resolveBrand(brand) {
 if (typeof window.FACTS === 'undefined' || window.FACTS.length === 0) {
   window.FACTS = [];
   (function buildFacts() {
+    // Con ~1.5M de filas, crear un Date y formatear la fecha por CADA fila era
+    // el grueso del arranque. La fecha de un mismo día (offset) y las
+    // dimensiones de un mismo combo se resuelven una sola vez y se reutilizan —
+    // el resultado (forma y valores de cada fila) es idéntico al de antes.
+    const dateInfo = new Map();
+    const comboInfo = new Array(DIM_COMBOS.length);
+    const tuples = [];
+    const facts = window.FACTS;
     for (const row of DAILY) {
-    const [d, c, g, disc, n] = row;
-    const combo = DIM_COMBOS[c];
-    const date = addDays(baseDateObj, d);
-    const brand = resolveBrand(DIM_BRANDS[combo[3]]);
-    window.FACTS.push({
-      gran: 'day', dateISO: toISO(date), dow: date.getDay(), month: date.getMonth(),
-      country: DIM_COUNTRIES[combo[0]], city: DIM_CITIES[combo[1]],
-      kitchenId: DIM_KITCHENS[combo[2]].id, kitchenName: DIM_KITCHENS[combo[2]].name,
-      brandId: brand.id, brandName: brand.name,
-      provider: DIM_PROVIDERS[combo[4]],
+    const d = row[0], c = row[1], g = row[2], disc = row[3], n = row[4];
+    let di = dateInfo.get(d);
+    if (!di) {
+      const date = addDays(baseDateObj, d);
+      di = { iso: toISO(date), dow: date.getDay(), month: date.getMonth() };
+      dateInfo.set(d, di);
+    }
+    let ci = comboInfo[c];
+    if (!ci) {
+      const combo = DIM_COMBOS[c];
+      const brand = resolveBrand(DIM_BRANDS[combo[3]]);
+      ci = {
+        country: DIM_COUNTRIES[combo[0]], city: DIM_CITIES[combo[1]],
+        kitchenId: DIM_KITCHENS[combo[2]].id, kitchenName: DIM_KITCHENS[combo[2]].name,
+        brandId: brand.id, brandName: brand.name,
+        provider: DIM_PROVIDERS[combo[4]]
+      };
+      comboInfo[c] = ci;
+      tuples.push(ci);
+    }
+    facts.push({
+      gran: 'day', dateISO: di.iso, dow: di.dow, month: di.month,
+      country: ci.country, city: ci.city,
+      kitchenId: ci.kitchenId, kitchenName: ci.kitchenName,
+      brandId: ci.brandId, brandName: ci.brandName,
+      provider: ci.provider,
       gmv: g, discount: disc, orders: n
     });
   }
@@ -274,6 +298,15 @@ if (typeof window.FACTS === 'undefined' || window.FACTS.length === 0) {
       gmv: g, discount: disc, orders: n
     });
   }
+  // Combinaciones distintas país/ciudad/cocina/marca/plataforma (decenas de miles)
+  // y filas separadas por país: para las listas de opciones de los filtros y para
+  // filtrar un solo país sin recorrer los otros. Mismos datos, solo índices.
+  const byCountry = new Map();
+  for (const f of window.FACTS) {
+    let arr = byCountry.get(f.country); if (!arr) { arr = []; byCountry.set(f.country, arr); } arr.push(f);
+  }
+  if (MONTHLY.length === 0) window.__DIM_TUPLES = { n: window.FACTS.length, list: tuples };
+  window.__FACTS_BY_COUNTRY = { n: window.FACTS.length, map: byCountry };
   })();
 }
 
@@ -362,14 +395,58 @@ function matchesGlobalFilters(f, opts = {}) {
   return true;
 }
 
+// Cada sección del dashboard pedía su propio filtrado de ~1.5M de filas (varias
+// veces por cambio de filtro, con los mismos filtros). Ahora el resultado se
+// guarda por combinación de filtros y se reutiliza: la versión "con fecha" parte
+// de la versión "sin fecha" ya filtrada (mucho más chica si hay país elegido).
+// Las listas devueltas NO deben modificarse (nadie lo hace hoy: solo se leen).
+const __filteredFactsCache = new Map();
 function getFilteredFacts(opts = {}) {
-  return window.FACTS.filter(f => matchesGlobalFilters(f, opts));
+  const filt = state.filters;
+  const dimKey = [filt.country, filt.city, filt.kitchen, filt.provider, filt.brand].map(a => a.join(',')).join('|') + '#' + window.FACTS.length;
+  const key = dimKey + '#' + (opts.ignoreDate ? 'x' : (state.dateFrom || '') + '..' + (state.dateTo || ''));
+  const hit = __filteredFactsCache.get(key);
+  if (hit) return hit;
+  // Con un solo país elegido solo se recorren las filas de ese país (mismo orden
+  // relativo que en FACTS), no las de los tres países.
+  const part = window.__FACTS_BY_COUNTRY;
+  const source = (filt.country.length === 1 && part && part.n === window.FACTS.length && part.map.get(filt.country[0])) || window.FACTS;
+  let result;
+  if (opts.ignoreDate) {
+    result = source.filter(f => matchesGlobalFilters(f, opts));
+  } else {
+    const baseKey = dimKey + '#x';
+    let base = __filteredFactsCache.get(baseKey);
+    if (!base) {
+      base = source.filter(f => matchesGlobalFilters(f, { ignoreDate: true }));
+      __filteredFactsCache.set(baseKey, base);
+    }
+    result = base.filter(f => matchesGlobalFilters(f, opts));
+  }
+  if (__filteredFactsCache.size > 24) __filteredFactsCache.clear();
+  __filteredFactsCache.set(key, result);
+  return result;
 }
 
 // Opciones disponibles por nivel, respetando cascading País→Ciudad→Cocina→Plataforma→Marca
+// (solo depende de los filtros de dimensión, no de la fecha: se guarda por combinación).
+let __cascadeCache = { key: null, value: null };
 function computeCascadeOptions() {
   const filt = state.filters;
-  const afterCountry = window.FACTS.filter(f => !filt.country.length || filt.country.includes(f.country));
+  const cascadeKey = [filt.country, filt.city, filt.kitchen, filt.provider, filt.brand].map(a => a.join(',')).join('|') + '#' + window.FACTS.length;
+  if (__cascadeCache.key === cascadeKey) return __cascadeCache.value;
+  const value = computeCascadeOptionsUncached();
+  __cascadeCache = { key: cascadeKey, value };
+  return value;
+}
+function computeCascadeOptionsUncached() {
+  const filt = state.filters;
+  // Las opciones solo dependen de qué combinaciones país/ciudad/cocina/marca/
+  // plataforma EXISTEN, no de cuántas filas hay de cada una: se calculan sobre las
+  // combinaciones distintas (decenas de miles) en vez de sobre ~1.5M de filas.
+  const tup = window.__DIM_TUPLES;
+  const SRC = (tup && tup.n === window.FACTS.length) ? tup.list : window.FACTS;
+  const afterCountry = SRC.filter(f => !filt.country.length || filt.country.includes(f.country));
   const cityOpts = uniqueSorted(afterCountry.map(f => f.city));
 
   const afterCity = afterCountry.filter(f => !filt.city.length || filt.city.includes(f.city));
@@ -381,7 +458,7 @@ function computeCascadeOptions() {
   const afterProvider = afterKitchen.filter(f => !filt.provider.length || filt.provider.includes(f.provider));
   const brandOpts = uniqueByKey(afterProvider, f => f.brandId, f => ({ id: f.brandId, name: f.brandName }));
 
-  const countryOpts = uniqueSorted(window.FACTS.map(f => f.country));
+  const countryOpts = uniqueSorted(SRC.map(f => f.country));
 
   return { countryOpts, cityOpts, kitchenOpts, providerOpts, brandOpts };
 }

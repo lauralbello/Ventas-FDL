@@ -1001,7 +1001,7 @@ window.addEventListener('error', (e) => {
 <script src="brand-mapping.js?v=202609081430"></script>
 <script src="brand-categories.js?v=202609081430"></script>
 <script src="insights-engine.js?v=202609081430"></script>
-<script src="app-ui.js?v=202609141530"></script>
+<script src="app-ui.js?v=202610141700"></script>
 <script>
 // Critical inline initialization - app.js seems to have issues loading
 // Build FACTS manually if app.js didn't execute
@@ -1043,19 +1043,47 @@ if (typeof FACTS === 'undefined') {
     return BRAND_ID_REMAP_INLINE.get(brand.id) || brand;
   }
 
+  // La fecha de cada día y las dimensiones de cada combo se resuelven una sola vez
+  // y se reutilizan (antes: un Date nuevo y un formateo por cada una de ~1.5M filas).
+  // Las filas resultantes son idénticas. También se arman los índices que usa
+  // app.js: combinaciones distintas (para las listas de filtros) y filas por país.
+  const dateInfoInline = new Map();
+  const comboInfoInline = new Array(DIM_COMBOS.length);
+  const tuplesInline = [];
+  const byCountryInline = new Map();
   for (const row of DAILY) {
-    const [d, c, g, disc, n] = row;
-    const combo = DIM_COMBOS[c];
-    const date = addDays(baseDateObj, d);
-    const brand = resolveBrandInline(DIM_BRANDS[combo[3]]);
-    FACTS.push({
-      gran: 'day', dateISO: toISO(date), dow: date.getDay(), month: date.getMonth(),
-      country: DIM_COUNTRIES[combo[0]], city: DIM_CITIES[combo[1]],
-      kitchenId: DIM_KITCHENS[combo[2]].id, kitchenName: DIM_KITCHENS[combo[2]].name,
-      brandId: brand.id, brandName: brand.name,
-      provider: DIM_PROVIDERS[combo[4]],
+    const d = row[0], c = row[1], g = row[2], disc = row[3], n = row[4];
+    let di = dateInfoInline.get(d);
+    if (!di) {
+      const date = addDays(baseDateObj, d);
+      di = { iso: toISO(date), dow: date.getDay(), month: date.getMonth() };
+      dateInfoInline.set(d, di);
+    }
+    let ci = comboInfoInline[c];
+    if (!ci) {
+      const combo = DIM_COMBOS[c];
+      const brand = resolveBrandInline(DIM_BRANDS[combo[3]]);
+      ci = {
+        country: DIM_COUNTRIES[combo[0]], city: DIM_CITIES[combo[1]],
+        kitchenId: DIM_KITCHENS[combo[2]].id, kitchenName: DIM_KITCHENS[combo[2]].name,
+        brandId: brand.id, brandName: brand.name,
+        provider: DIM_PROVIDERS[combo[4]]
+      };
+      comboInfoInline[c] = ci;
+      tuplesInline.push(ci);
+    }
+    const fact = {
+      gran: 'day', dateISO: di.iso, dow: di.dow, month: di.month,
+      country: ci.country, city: ci.city,
+      kitchenId: ci.kitchenId, kitchenName: ci.kitchenName,
+      brandId: ci.brandId, brandName: ci.brandName,
+      provider: ci.provider,
       gmv: g, discount: disc, orders: n
-    });
+    };
+    FACTS.push(fact);
+    let arr = byCountryInline.get(ci.country);
+    if (!arr) { arr = []; byCountryInline.set(ci.country, arr); }
+    arr.push(fact);
   }
   for (const row of MONTHLY) {
     const [m, c, g, disc, n] = row;
@@ -1070,6 +1098,10 @@ if (typeof FACTS === 'undefined') {
       gmv: g, discount: disc, orders: n
     });
   }
+  if (MONTHLY.length === 0) {
+    window.__DIM_TUPLES = { n: FACTS.length, list: tuplesInline };
+    window.__FACTS_BY_COUNTRY = { n: FACTS.length, map: byCountryInline };
+  }
   console.log('FACTS built manually:', FACTS.length, 'rows');
 }
 
@@ -1082,7 +1114,7 @@ if (window.FACTS && window.FACTS.length === 0) {
 }
 </script>
 
-<script src="app.js?v=202610131500"></script>
+<script src="app.js?v=202610141700"></script>
 <script>
 // After app.js loads, verify FACTS and show/hide empty banner
 console.log('Checking FACTS:', typeof window.FACTS, window.FACTS ? window.FACTS.length : 'undefined');
