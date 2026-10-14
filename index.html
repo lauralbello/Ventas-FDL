@@ -1724,6 +1724,32 @@ const HISTORICAL_DAILY_PROVIDER_GMV_2025 = {"2025-01-01": {"BRA": {"Rappi": 130.
 // NO es el mes actual (real), se trata como un mes ya cerrado y se compara
 // completo (cutoffDay = último día de ese mes) en vez de recortarlo con la
 // fecha "Hasta" del filtro principal, que no tiene relación con ese mes.
+// Año vs Año debe respetar TODOS los filtros de dimensión (país, ciudad, cocina,
+// plataforma, marca), no solo el país — antes solo el país afectaba la
+// comparación: filtrar una ciudad o una cocina no cambiaba nada. La fecha NO se
+// aplica aquí (cada comparación elige sus propios períodos).
+function yoyDimFilter(f) {
+  const filt = state.filters;
+  if (filt.country.length && !filt.country.includes(f.country)) return false;
+  if (filt.city.length && !filt.city.includes(f.city)) return false;
+  if (filt.kitchen.length && !filt.kitchen.includes(f.kitchenId)) return false;
+  if (filt.provider.length && !filt.provider.includes(f.provider)) return false;
+  if (filt.brand.length && !filt.brand.includes(f.brandId)) return false;
+  return true;
+}
+// ¿Hay algún filtro MÁS FINO que país? Sin él, el año pasado sigue saliendo de las
+// tablas históricas de 2025 ya validadas (por país); con él esas tablas no sirven
+// (no tienen cocina ni cruces) y el año pasado se calcula directo de FACTS.
+function hasYoyFineFilter() {
+  const filt = state.filters;
+  return filt.city.length > 0 || filt.kitchen.length > 0 || filt.provider.length > 0 || filt.brand.length > 0;
+}
+function yoyFactsSource() {
+  const part = window.__FACTS_BY_COUNTRY;
+  const cs = state.filters.country;
+  return (cs.length === 1 && part && part.n === FACTS.length && part.map.get(cs[0])) || FACTS;
+}
+
 function analyzeDimensionYoYComparison(facts, dimField, historicalDataByMonth, labelKey, historicalDailyByLabel, overrideYear, overrideMonth) {
   const filteredCountries = new Set();
   for (const f of facts) if (f.country) filteredCountries.add(f.country);
@@ -1734,25 +1760,45 @@ function analyzeDimensionYoYComparison(facts, dimField, historicalDataByMonth, l
   const targetMonth = overrideMonth != null ? overrideMonth : refM;
   const isCurrentPeriod = (targetYear === refY && targetMonth === refM);
   const lastYear = targetYear - 1;
-  const historicalData = historicalDataByMonth[targetMonth] || {};
+  let historicalData = historicalDataByMonth[targetMonth] || {};
   const asOfISO = isCurrentPeriod
     ? ((state.dateTo && state.dateTo <= LAST_DATA_ISO) ? state.dateTo : LAST_DATA_ISO)
     : ymd(targetYear, targetMonth, daysInMonth(targetYear, targetMonth));
   const cutoffDay = new Date(asOfISO + 'T00:00:00').getDate();
 
-  const allFacts = typeof FACTS !== 'undefined' ? FACTS : facts;
+  const allFacts = typeof FACTS !== 'undefined' ? yoyFactsSource() : facts;
   const current = {}; // key: "Valor|País" -> GMV moneda local, mes/año objetivo (parcial si el mes está en curso)
   const currentFactsByKey = {}; // key -> facts del mes objetivo, para poder proyectar su RR
+
+  // Con un filtro más fino que país (ciudad/cocina/plataforma/marca), el año pasado
+  // se arma desde FACTS (que trae 2025 día a día con todas las dimensiones) en vez
+  // de las tablas históricas por país, que no se pueden filtrar.
+  const fineFilter = hasYoyFineFilter();
+  const lastYearMonthPrefix = lastYear + '-' + pad2(targetMonth + 1);
+  const curMonthPrefix = targetYear + '-' + pad2(targetMonth + 1);
+  if (fineFilter) {
+    historicalData = {};
+    historicalDailyByLabel = {};
+  }
 
   for (const f of allFacts) {
     const label = f[dimField];
     if (!f.dateISO || !label || !f.country) continue;
     if (!countriesToProcess.has(f.country)) continue;
-    const date = new Date(f.dateISO + 'T00:00:00');
-    if (date.getFullYear() !== targetYear || date.getMonth() !== targetMonth) continue;
-    const key = label + '|' + f.country;
-    current[key] = (current[key] || 0) + f.gmv;
-    (currentFactsByKey[key] = currentFactsByKey[key] || []).push(f);
+    const monthPrefix = f.dateISO.slice(0, 7);
+    if (monthPrefix === curMonthPrefix) {
+      if (!yoyDimFilter(f)) continue;
+      const key = label + '|' + f.country;
+      current[key] = (current[key] || 0) + f.gmv;
+      (currentFactsByKey[key] = currentFactsByKey[key] || []).push(f);
+    } else if (fineFilter && monthPrefix === lastYearMonthPrefix) {
+      if (!yoyDimFilter(f)) continue;
+      const byCountry = historicalData[f.country] || (historicalData[f.country] = {});
+      byCountry[label] = (byCountry[label] || 0) + f.gmv;
+      const dayData = historicalDailyByLabel[f.dateISO] || (historicalDailyByLabel[f.dateISO] = {});
+      const dayCountry = dayData[f.country] || (dayData[f.country] = {});
+      dayCountry[label] = (dayCountry[label] || 0) + f.gmv;
+    }
   }
 
   // Si el mes objetivo está en curso (no ha terminado), comparar su GMV parcial
@@ -1854,9 +1900,9 @@ function analyzeProviderYoYComparison(facts, overrideYear, overrideMonth) {
 // ya cerrado, así que se muestra la venta real de ambos períodos tal cual.
 function sumByDimensionRange(dimField, countries, fromISO, toISO) {
   const totals = {};
-  for (const f of FACTS) {
+  for (const f of yoyFactsSource()) {
     if (f.gran !== 'day' || !f.dateISO || f.dateISO < fromISO || f.dateISO > toISO) continue;
-    if (!countries.includes(f.country)) continue;
+    if (!countries.includes(f.country) || !yoyDimFilter(f)) continue;
     const label = f[dimField];
     if (!label) continue;
     const key = label + '|' + f.country;
@@ -3436,19 +3482,32 @@ function analyzeSameDateYoYComparison(overrideYear, overrideMonth) {
     : ymd(targetYear, targetMonth, daysInMonth(targetYear, targetMonth));
   const cutoffDay = new Date(asOfISO + 'T00:00:00').getDate();
 
-  const currentFacts = FACTS.filter(f => f.gran === 'day' && f.country && countries.includes(f.country) &&
-    f.dateISO >= ymd(targetYear, targetMonth, 1) && f.dateISO <= asOfISO);
+  const currentFrom = ymd(targetYear, targetMonth, 1);
+  const currentFacts = yoyFactsSource().filter(f => f.gran === 'day' && f.country && countries.includes(f.country) &&
+    f.dateISO >= currentFrom && f.dateISO <= asOfISO && yoyDimFilter(f));
   const currentGMV = currentFacts.reduce((s, f) => s + fxValue(f.gmv, f.country), 0);
 
   let lastYearGMV = 0;
   let hasHistorical = false;
-  for (let d = 1; d <= cutoffDay; d++) {
-    const iso = ymd(lastYear, targetMonth, d);
-    const dayData = HISTORICAL_DAILY_GMV_2025[iso];
-    if (!dayData) continue;
-    hasHistorical = true;
-    for (const c of countries) {
-      if (dayData[c]) lastYearGMV += fxValue(dayData[c], c);
+  if (hasYoyFineFilter()) {
+    // Filtro más fino que país: el año pasado se suma directo de FACTS (2025 día
+    // a día con todas las dimensiones), porque las tablas históricas son por país.
+    const lyFrom = ymd(lastYear, targetMonth, 1), lyTo = ymd(lastYear, targetMonth, cutoffDay);
+    for (const f of yoyFactsSource()) {
+      if (f.gran !== 'day' || !f.dateISO || f.dateISO < lyFrom || f.dateISO > lyTo) continue;
+      if (!f.country || !countries.includes(f.country) || !yoyDimFilter(f)) continue;
+      hasHistorical = true;
+      lastYearGMV += fxValue(f.gmv, f.country);
+    }
+  } else {
+    for (let d = 1; d <= cutoffDay; d++) {
+      const iso = ymd(lastYear, targetMonth, d);
+      const dayData = HISTORICAL_DAILY_GMV_2025[iso];
+      if (!dayData) continue;
+      hasHistorical = true;
+      for (const c of countries) {
+        if (dayData[c]) lastYearGMV += fxValue(dayData[c], c);
+      }
     }
   }
 
@@ -3475,7 +3534,7 @@ function renderSameDateYoYComparison(overrideYear, overrideMonth) {
       '<div>Diferencia: <b style="color:' + diffColor + ';">' + diffSign + fmtMoney(Math.abs(cmp.diff)) + ' (' + (cmp.pct >= 0 ? '+' : '') + cmp.pct.toFixed(1) + '%)</b></div>' +
       '</div>';
   }
-  html += '<div style="margin-top:8px;font-size:9px;color:var(--text-muted);">📌 Venta real día por día (sin proyección de Run Rate) hasta la misma fecha de calendario en ambos años — respeta el filtro de país activo.</div>';
+  html += '<div style="margin-top:8px;font-size:9px;color:var(--text-muted);">📌 Venta real día por día (sin proyección de Run Rate) hasta la misma fecha de calendario en ambos años — respeta los filtros activos (país, ciudad, cocina, plataforma y marca).</div>';
   html += '</div>';
   return html;
 }
@@ -3727,12 +3786,22 @@ function computeYoYDiffBreakdown(row) {
   // Un solo filtro sobre FACTS (país + mes/año objetivo + valor de esta fila) —
   // las 2-3 secciones se agrupan a partir de este mismo subconjunto, en vez de
   // recorrer todo FACTS una vez por sección.
-  const relevantFacts = (typeof FACTS !== 'undefined' ? FACTS : []).filter(f => {
-    if (f.gran !== 'day' || !f.dateISO || f.country !== row.country) return false;
-    if (f[primaryField] !== row.label) return false;
-    const d = new Date(f.dateISO + 'T00:00:00');
-    return d.getFullYear() === row.targetYear && d.getMonth() === row.targetMonth;
-  });
+  const fine = hasYoyFineFilter();
+  const part = window.__FACTS_BY_COUNTRY;
+  const countryFacts = (typeof FACTS !== 'undefined')
+    ? ((part && part.n === FACTS.length && part.map.get(row.country)) || FACTS)
+    : [];
+  const curPrefix = row.targetYear + '-' + pad2(row.targetMonth + 1);
+  const lyPrefix = (row.targetYear - 1) + '-' + pad2(row.targetMonth + 1);
+  const relevantFacts = [];
+  const lastYearFacts = [];
+  for (const f of countryFacts) {
+    if (f.gran !== 'day' || !f.dateISO || f.country !== row.country) continue;
+    if (f[primaryField] !== row.label) continue;
+    const mp = f.dateISO.slice(0, 7);
+    if (mp === curPrefix) { if (yoyDimFilter(f)) relevantFacts.push(f); }
+    else if (fine && mp === lyPrefix && yoyDimFilter(f)) lastYearFacts.push(f);
+  }
 
   return configs.map(cfg => {
     const currentMap = {};
@@ -3744,7 +3813,14 @@ function computeYoYDiffBreakdown(row) {
     const histTable = YOY_HISTORICAL_TABLES[cfg.historical] || {};
     const histForCountry = (histTable[row.targetMonth] || {})[row.country] || {};
     const lastYearMap = {};
-    if (!cfg.invert) {
+    if (fine) {
+      // Con filtro más fino que país las tablas históricas no sirven: el año
+      // pasado sale de FACTS agrupado por esta misma dimensión.
+      for (const f of lastYearFacts) {
+        const secVal = f[cfg.field];
+        lastYearMap[secVal] = (lastYearMap[secVal] || 0) + f.gmv;
+      }
+    } else if (!cfg.invert) {
       Object.assign(lastYearMap, histForCountry[row.label] || {});
     } else {
       for (const primaryVal in histForCountry) {
